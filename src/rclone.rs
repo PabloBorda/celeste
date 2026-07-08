@@ -7,49 +7,71 @@ use std::collections::HashMap;
 use time::OffsetDateTime;
 
 /// Get a remote from the config file.
-pub fn get_remote<T: ToString>(remote: T) -> Option<Remote> {
+pub fn get_remote_config<T: ToString>(remote: T) -> Option<HashMap<String, String>> {
     let remote = remote.to_string();
 
     let config_str = util::run_in_background(
         glib::clone!(@strong remote => move || librclone::rpc("config/get", json!({
             "name": remote
-        }).to_string()).unwrap()),
+        }).to_string())),
     );
-    let config: HashMap<String, String> = serde_json::from_str(&config_str).unwrap();
+    let config_str = match config_str {
+        Ok(config_str) => config_str,
+        Err(err) => {
+            util::log_line(&format!("rclone config/get failed remote={} error={}", remote, err));
+            return None;
+        }
+    };
+    match serde_json::from_str(&config_str) {
+        Ok(config) => config,
+        Err(err) => {
+            util::log_line(&format!(
+                "rclone config/get parse failed remote={} error={}",
+                remote, err
+            ));
+            return None;
+        }
+    }
+}
 
-    match config["type"].as_str() {
+/// Get a remote from the config file.
+pub fn get_remote<T: ToString>(remote: T) -> Option<Remote> {
+    let remote = remote.to_string();
+    let config = get_remote_config(&remote)?;
+
+    match config.get("type").map(String::as_str)? {
         "dropbox" => Some(Remote::Dropbox(DropboxRemote {
             remote_name: remote,
-            client_id: config["client_id"].clone(),
-            client_secret: config["client_secret"].clone(),
+            client_id: config.get("client_id").cloned().unwrap_or_default(),
+            client_secret: config.get("client_secret").cloned().unwrap_or_default(),
         })),
         "drive" => Some(Remote::GDrive(GDriveRemote {
             remote_name: remote,
-            client_id: config["client_id"].clone(),
-            client_secret: config["client_secret"].clone(),
+            client_id: config.get("client_id").cloned().unwrap_or_default(),
+            client_secret: config.get("client_secret").cloned().unwrap_or_default(),
         })),
         "pcloud" => Some(Remote::PCloud(PCloudRemote {
             remote_name: remote,
-            client_id: config["client_id"].clone(),
-            client_secret: config["client_secret"].clone(),
+            client_id: config.get("client_id").cloned().unwrap_or_default(),
+            client_secret: config.get("client_secret").cloned().unwrap_or_default(),
         })),
         "protondrive" => Some(Remote::ProtonDrive(ProtonDriveRemote {
             remote_name: remote,
-            username: config["username"].clone(),
+            username: config.get("username").cloned().unwrap_or_default(),
         })),
         "webdav" => {
-            let vendor = match config["vendor"].as_str() {
-                "nextcloud" => WebDavVendors::Nextcloud,
-                "owncloud" => WebDavVendors::Owncloud,
-                "webdav" => WebDavVendors::WebDav,
-                _ => unreachable!(),
+            let vendor = match config.get("vendor").map(String::as_str) {
+                Some("nextcloud") => WebDavVendors::Nextcloud,
+                Some("owncloud") => WebDavVendors::Owncloud,
+                Some("webdav") => WebDavVendors::WebDav,
+                _ => return None,
             };
 
             Some(Remote::WebDav(WebDavRemote {
                 remote_name: remote,
-                user: config["user"].clone(),
-                pass: config["pass"].clone(),
-                url: config["user"].clone(),
+                user: config.get("user").cloned().unwrap_or_default(),
+                pass: config.get("pass").cloned().unwrap_or_default(),
+                url: config.get("url").cloned().unwrap_or_default(),
                 vendor,
             }))
         }
@@ -57,20 +79,25 @@ pub fn get_remote<T: ToString>(remote: T) -> Option<Remote> {
     }
 }
 
-/// Get all the remotes from the config file.
-pub fn get_remotes() -> Vec<Remote> {
+/// Get all remote names from the config file.
+pub fn get_remote_names() -> Vec<String> {
     let configs_str = util::run_in_background(move || {
         librclone::rpc("config/listremotes", json!({}).to_string())
             .unwrap_or_else(|_| unreachable!())
     });
-    let configs = {
-        let config: HashMap<String, Vec<String>> = serde_json::from_str(&configs_str).unwrap();
-        config.get(&"remotes".to_string()).unwrap().to_owned()
-    };
+    let config: HashMap<String, Vec<String>> = serde_json::from_str(&configs_str).unwrap();
+    config.get(&"remotes".to_string()).unwrap().to_owned()
+}
+
+/// Get all the Celeste-supported remotes from the config file.
+pub fn get_remotes() -> Vec<Remote> {
+    let configs = get_remote_names();
     let mut celeste_configs = vec![];
 
     for config in configs {
-        celeste_configs.push(get_remote(&config).unwrap());
+        if let Some(remote) = get_remote(&config) {
+            celeste_configs.push(remote);
+        }
     }
 
     celeste_configs
@@ -231,6 +258,7 @@ pub mod sync {
     use super::{RcloneError, RcloneList, RcloneListFilter, RcloneRemoteItem, RcloneStat};
     use crate::util;
     use serde_json::json;
+    use std::time::Instant;
 
     /// Get a remote name.
     fn get_remote_name(remote: &str) -> String {
@@ -244,7 +272,29 @@ pub mod sync {
     fn run<T: ToString>(method: T, input: T) -> Result<String, String> {
         let method = method.to_string();
         let input = input.to_string();
-        util::run_in_background(|| librclone::rpc(method, input))
+        let log_method = method.clone();
+        let input_len = input.len();
+        let start = Instant::now();
+        let result = util::run_in_background(|| librclone::rpc(method, input));
+        let elapsed = start.elapsed();
+
+        match &result {
+            Ok(_) => util::log_line(&format!(
+                "rclone rpc ok method={} elapsed_ms={} input_bytes={}",
+                log_method,
+                elapsed.as_millis(),
+                input_len
+            )),
+            Err(err) => util::log_line(&format!(
+                "rclone rpc error method={} elapsed_ms={} input_bytes={} error={}",
+                log_method,
+                elapsed.as_millis(),
+                input_len,
+                err
+            )),
+        }
+
+        result
     }
 
     /// Common function for some of the below command.

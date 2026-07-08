@@ -17,10 +17,7 @@ pub fn server_name_input() -> EntryRow {
         let text = input.text();
 
         // Get a list of already existing config names.
-        let existing_remotes: Vec<String> = rclone::get_remotes()
-            .iter()
-            .map(|config| config.remote_name())
-            .collect();
+        let existing_remotes = rclone::get_remote_names();
 
         if existing_remotes.contains(&text.to_string()) {
             input.add_css_class("error");

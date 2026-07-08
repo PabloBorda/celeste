@@ -1,7 +1,7 @@
 use crate::{mpsc, util};
 use adw::{
     glib,
-    gtk::{Orientation, ScrolledWindow, Separator, TextBuffer, TextView},
+    gtk::{Image, Orientation, ScrolledWindow, Separator, TextBuffer, TextView},
     prelude::*,
     MessageDialog,
 };
@@ -81,4 +81,29 @@ pub fn separator() -> Separator {
         .orientation(Orientation::Vertical)
         .css_classes(vec!["spacer".to_string()])
         .build()
+}
+
+/// Create an image from embedded PNG/SVG bytes.
+pub fn image_from_bytes(bytes: &'static [u8], width: i32, height: i32) -> Image {
+    let image = Image::builder()
+        .width_request(width)
+        .height_request(height)
+        .build();
+    set_image_from_bytes(&image, bytes, width, height);
+    image
+}
+
+/// Replace an existing image's contents from embedded PNG/SVG bytes.
+pub fn set_image_from_bytes(image: &Image, bytes: &'static [u8], width: i32, height: i32) {
+    let loader = adw::gtk::gdk_pixbuf::PixbufLoader::new();
+    loader.set_size(width, height);
+
+    if loader.write(bytes).is_ok()
+        && loader.close().is_ok()
+        && let Some(pixbuf) = loader.pixbuf()
+    {
+        image.set_from_pixbuf(Some(&pixbuf));
+        image.set_width_request(width);
+        image.set_height_request(height);
+    }
 }
